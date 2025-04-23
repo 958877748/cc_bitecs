@@ -1,5 +1,6 @@
-import { CocosNode } from "../script/Component";
 import System from "./System";
+
+export const CocosNode = bitecs.defineComponent()
 
 @cc._decorator.ccclass
 export default class World extends cc.Component {
