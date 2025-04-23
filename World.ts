@@ -12,6 +12,7 @@ export default class World extends cc.Component {
         this.world = bitecs.createWorld();
         this.systems = this.getComponentsInChildren(System)
         this.systems.forEach(sys => {
+            sys.ecsWorld = this.world
             sys.initializeSystem(this)
         })
         this.pipeline = bitecs.pipe(...this.systems.map(sys => sys.onUpdate.bind(sys)))
