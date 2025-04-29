@@ -34,10 +34,13 @@ export default class World extends cc.Component {
     removeEntity(eid: number) {
         bitecs.removeEntity(this.world, eid)
     }
-    entityAddComponent(eid: number, component: any) {
+    entityAddComponent(eid: number, component: bitecs.Component) {
         bitecs.addComponent(this.world, component, eid)
     }
-    entityRemoveComponent(eid: number, component: any) {
+    entityHasComponent(eid: number, component: bitecs.Component) {
+        return bitecs.hasComponent(this.world, component, eid)
+    }
+    entityRemoveComponent(eid: number, component: bitecs.Component) {
         bitecs.removeComponent(this.world, component, eid)
     }
 }
