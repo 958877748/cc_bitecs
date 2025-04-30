@@ -6,19 +6,21 @@ export const CocosNode = bitecs.defineComponent()
 export default class World extends cc.Component {
     private world: bitecs.IWorld
     private systems: System[] = []
-    private pipeline: (dt: number) => void;
     entityNodeMap = new Map<number, cc.Node>();
     protected onLoad() {
         this.world = bitecs.createWorld();
         this.systems = this.getComponentsInChildren(System)
+    }
+    protected start() {
         this.systems.forEach(sys => {
             sys.ecsWorld = this.world
             sys.initializeSystem(this)
         })
-        this.pipeline = bitecs.pipe(...this.systems.map(sys => sys.onUpdate.bind(sys)))
     }
     protected update(dt: number) {
-        this.pipeline(dt)
+        for (let i = 0; i < this.systems.length; i++) {
+            this.systems[i].onUpdate(dt)
+        }
     }
     getEcsWorld() {
         return this.world
