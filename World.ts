@@ -9,7 +9,10 @@ export default class World extends cc.Component {
     entityNodeMap = new Map<number, cc.Node>();
     protected onLoad() {
         this.world = bitecs.createWorld();
-        this.systems = this.getComponentsInChildren(System)
+    }
+    addSystem(type: new () => System) {
+        const sys = this.addComponent(type)
+        this.systems.push(sys)
     }
     protected start() {
         this.systems.forEach(sys => {
