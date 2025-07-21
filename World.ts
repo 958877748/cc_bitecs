@@ -1,21 +1,19 @@
 import System from "./System";
 
-export const CocosNode = bitecs.defineComponent()
-
 @cc._decorator.ccclass
 export default class World extends cc.Component {
     private world: bitecs.IWorld
-    private systems: System[] = []
-    entityNodeMap = new Map<number, cc.Node>();
+    private systems: System<World>[] = []
     protected onLoad() {
         this.world = bitecs.createWorld();
     }
-    addSystem(type: new () => System) {
+    addSystem<S extends System<World>>(type: new () => S) {
         const sys = this.addComponent(type)
         this.systems.push(sys)
     }
     protected start() {
         this.systems.forEach(sys => {
+            sys.world = this
             sys.ecsWorld = this.world
             sys.initializeSystem(this)
         })
@@ -30,10 +28,6 @@ export default class World extends cc.Component {
     }
     createEntity(node?: cc.Node) {
         const eid = bitecs.addEntity(this.world)
-        if (node) {
-            this.entityNodeMap.set(eid, node)
-            this.entityAddComponent(eid, CocosNode)
-        }
         return eid
     }
     removeEntity(eid: number) {
