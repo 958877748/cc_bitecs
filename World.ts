@@ -2,7 +2,7 @@ import System from "./System";
 
 @cc._decorator.ccclass
 export default class World extends cc.Component {
-    private world: bitecs.IWorld
+    private world: bitecs.World
     private systems: System<World>[] = []
     protected onLoad() {
         this.world = bitecs.createWorld();
@@ -10,6 +10,9 @@ export default class World extends cc.Component {
     addSystem<S extends System<World>>(type: new () => S) {
         const sys = this.addComponent(type)
         this.systems.push(sys)
+    }
+    registerComponent(component: any) {
+        bitecs.registerComponent(this.world, component)
     }
     protected start() {
         this.systems.forEach(sys => {
@@ -26,20 +29,20 @@ export default class World extends cc.Component {
     getEcsWorld() {
         return this.world
     }
-    createEntity(node?: cc.Node) {
+    createEid(node?: cc.Node) {
         const eid = bitecs.addEntity(this.world)
         return eid
     }
-    removeEntity(eid: number) {
+    eidAddComp(eid: number, comp: any) {
+        bitecs.addComponent(this.world, eid, comp)
+    }
+    removeEid(eid: number) {
         bitecs.removeEntity(this.world, eid)
     }
-    entityAddComponent(eid: number, component: bitecs.Component) {
-        bitecs.addComponent(this.world, component, eid)
+    eidHasComp(eid: number, comp: any) {
+        return bitecs.hasComponent(this.world, eid, comp)
     }
-    entityHasComponent(eid: number, component: bitecs.Component) {
-        return bitecs.hasComponent(this.world, component, eid)
-    }
-    entityRemoveComponent(eid: number, component: bitecs.Component) {
-        bitecs.removeComponent(this.world, component, eid)
+    eidRemoveComp(eid: number, component: any) {
+        bitecs.removeComponent(this.world, eid, component)
     }
 }

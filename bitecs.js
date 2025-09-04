@@ -1,216 +1,147 @@
 (() => {
-  // src/Constants.js
-  var TYPES_ENUM = {
-    i8: "i8",
-    ui8: "ui8",
-    ui8c: "ui8c",
-    i16: "i16",
-    ui16: "ui16",
-    i32: "i32",
-    ui32: "ui32",
-    f32: "f32",
-    f64: "f64",
-    eid: "eid"
+  // src/core/utils/defineHiddenProperty.ts
+  var defineHiddenProperty = (obj, key, value) => Object.defineProperty(obj, key, {
+    value,
+    enumerable: false,
+    writable: true,
+    configurable: true
+  });
+
+  // src/core/EntityIndex.ts
+  var getId = (index, id) => id & index.entityMask;
+  var getVersion = (index, id) => id >>> index.versionShift & (1 << index.versionBits) - 1;
+  var incrementVersion = (index, id) => {
+    const currentVersion = getVersion(index, id);
+    const newVersion = currentVersion + 1 & (1 << index.versionBits) - 1;
+    return id & index.entityMask | newVersion << index.versionShift;
   };
-  var TYPES_NAMES = {
-    i8: "Int8",
-    ui8: "Uint8",
-    ui8c: "Uint8Clamped",
-    i16: "Int16",
-    ui16: "Uint16",
-    i32: "Int32",
-    ui32: "Uint32",
-    eid: "Uint32",
-    f32: "Float32",
-    f64: "Float64"
+  var withVersioning = (versionBits) => ({
+    versioning: true,
+    versionBits
+  });
+  var createEntityIndex = (options) => {
+    const config = options ? typeof options === "function" ? options() : options : { versioning: false, versionBits: 8 };
+    const versionBits = config.versionBits ?? 8;
+    const versioning = config.versioning ?? false;
+    const entityBits = 32 - versionBits;
+    const entityMask = (1 << entityBits) - 1;
+    const versionShift = entityBits;
+    const versionMask = (1 << versionBits) - 1 << versionShift;
+    return {
+      aliveCount: 0,
+      dense: [],
+      sparse: [],
+      maxId: 0,
+      versioning,
+      versionBits,
+      entityMask,
+      versionShift,
+      versionMask
+    };
   };
-  var TYPES = {
-    i8: Int8Array,
-    ui8: Uint8Array,
-    ui8c: Uint8ClampedArray,
-    i16: Int16Array,
-    ui16: Uint16Array,
-    i32: Int32Array,
-    ui32: Uint32Array,
-    f32: Float32Array,
-    f64: Float64Array,
-    eid: Uint32Array
+  var addEntityId = (index) => {
+    if (index.aliveCount < index.dense.length) {
+      const recycledId = index.dense[index.aliveCount];
+      const entityId = recycledId;
+      index.sparse[entityId] = index.aliveCount;
+      index.aliveCount++;
+      return recycledId;
+    }
+    const id = ++index.maxId;
+    index.dense.push(id);
+    index.sparse[id] = index.aliveCount;
+    index.aliveCount++;
+    return id;
   };
-  var UNSIGNED_MAX = {
-    uint8: 2 ** 8,
-    uint16: 2 ** 16,
-    uint32: 2 ** 32
+  var removeEntityId = (index, id) => {
+    const denseIndex = index.sparse[id];
+    if (denseIndex === void 0 || denseIndex >= index.aliveCount) {
+      return;
+    }
+    const lastIndex = index.aliveCount - 1;
+    const lastId = index.dense[lastIndex];
+    index.sparse[lastId] = denseIndex;
+    index.dense[denseIndex] = lastId;
+    index.sparse[id] = lastIndex;
+    index.dense[lastIndex] = id;
+    if (index.versioning) {
+      const newId = incrementVersion(index, id);
+      index.dense[lastIndex] = newId;
+    }
+    index.aliveCount--;
+  };
+  var isEntityIdAlive = (index, id) => {
+    const entityId = getId(index, id);
+    const denseIndex = index.sparse[entityId];
+    return denseIndex !== void 0 && denseIndex < index.aliveCount && index.dense[denseIndex] === id;
   };
 
-  // src/Storage.js
-  var roundToMultiple = (mul) => (x) => Math.ceil(x / mul) * mul;
-  var roundToMultiple4 = roundToMultiple(4);
-  var $storeRef = Symbol("storeRef");
-  var $storeSize = Symbol("storeSize");
-  var $storeMaps = Symbol("storeMaps");
-  var $storeFlattened = Symbol("storeFlattened");
-  var $storeBase = Symbol("storeBase");
-  var $storeType = Symbol("storeType");
-  var $storeArrayElementCounts = Symbol("storeArrayElementCounts");
-  var $storeSubarrays = Symbol("storeSubarrays");
-  var $subarrayCursors = Symbol("subarrayCursors");
-  var $subarray = Symbol("subarray");
-  var $subarrayFrom = Symbol("subarrayFrom");
-  var $subarrayTo = Symbol("subarrayTo");
-  var $parentArray = Symbol("parentArray");
-  var $tagStore = Symbol("tagStore");
-  var $queryShadow = Symbol("queryShadow");
-  var $serializeShadow = Symbol("serializeShadow");
-  var $indexType = Symbol("indexType");
-  var $indexBytes = Symbol("indexBytes");
-  var $isEidType = Symbol("isEidType");
-  var stores = {};
-  var resize = (ta, size) => {
-    const newBuffer = new ArrayBuffer(size * ta.BYTES_PER_ELEMENT);
-    const newTa = new ta.constructor(newBuffer);
-    newTa.set(ta, 0);
-    return newTa;
-  };
-  var createShadow = (store, key) => {
-    if (!ArrayBuffer.isView(store)) {
-      const shadowStore = store[$parentArray].slice(0);
-      store[key] = store.map((_, eid) => {
-        const { length } = store[eid];
-        const start = length * eid;
-        const end = start + length;
-        return shadowStore.subarray(start, end);
-      });
-    } else {
-      store[key] = store.slice(0);
-    }
-  };
-  var resetStoreFor = (store, eid) => {
-    if (store[$storeFlattened]) {
-      store[$storeFlattened].forEach((ta) => {
-        if (ArrayBuffer.isView(ta))
-          ta[eid] = 0;
-        else
-          ta[eid].fill(0);
-      });
-    }
-  };
-  var createTypeStore = (type, length) => {
-    const totalBytes = length * TYPES[type].BYTES_PER_ELEMENT;
-    const buffer = new ArrayBuffer(totalBytes);
-    const store = new TYPES[type](buffer);
-    store[$isEidType] = type === TYPES_ENUM.eid;
-    return store;
-  };
-  var parentArray = (store) => store[$parentArray];
-  var createArrayStore = (metadata, type, length) => {
-    const storeSize = metadata[$storeSize];
-    const store = Array(storeSize).fill(0);
-    store[$storeType] = type;
-    store[$isEidType] = type === TYPES_ENUM.eid;
-    const cursors = metadata[$subarrayCursors];
-    const indexType = length <= UNSIGNED_MAX.uint8 ? TYPES_ENUM.ui8 : length <= UNSIGNED_MAX.uint16 ? TYPES_ENUM.ui16 : TYPES_ENUM.ui32;
-    if (!length)
-      throw new Error("bitECS - Must define component array length");
-    if (!TYPES[type])
-      throw new Error(`bitECS - Invalid component array property type ${type}`);
-    if (!metadata[$storeSubarrays][type]) {
-      const arrayElementCount = metadata[$storeArrayElementCounts][type];
-      const array = new TYPES[type](roundToMultiple4(arrayElementCount * storeSize));
-      array[$indexType] = TYPES_NAMES[indexType];
-      array[$indexBytes] = TYPES[indexType].BYTES_PER_ELEMENT;
-      metadata[$storeSubarrays][type] = array;
-    }
-    const start = cursors[type];
-    const end = start + storeSize * length;
-    cursors[type] = end;
-    store[$parentArray] = metadata[$storeSubarrays][type].subarray(start, end);
-    for (let eid = 0; eid < storeSize; eid++) {
-      const start2 = length * eid;
-      const end2 = start2 + length;
-      store[eid] = store[$parentArray].subarray(start2, end2);
-      store[eid][$indexType] = TYPES_NAMES[indexType];
-      store[eid][$indexBytes] = TYPES[indexType].BYTES_PER_ELEMENT;
-      store[eid][$subarray] = true;
-    }
-    return store;
-  };
-  var isArrayType = (x) => Array.isArray(x) && typeof x[0] === "string" && typeof x[1] === "number";
-  var createStore = (schema, size) => {
-    const $store = Symbol("store");
-    if (!schema || !Object.keys(schema).length) {
-      stores[$store] = {
-        [$storeSize]: size,
-        [$tagStore]: true,
-        [$storeBase]: () => stores[$store]
-      };
-      return stores[$store];
-    }
-    schema = JSON.parse(JSON.stringify(schema));
-    const arrayElementCounts = {};
-    const collectArrayElementCounts = (s) => {
-      const keys = Object.keys(s);
-      for (const k of keys) {
-        if (isArrayType(s[k])) {
-          if (!arrayElementCounts[s[k][0]])
-            arrayElementCounts[s[k][0]] = 0;
-          arrayElementCounts[s[k][0]] += s[k][1];
-        } else if (s[k] instanceof Object) {
-          collectArrayElementCounts(s[k]);
-        }
+  // src/core/World.ts
+  var $internal = Symbol.for("bitecs_internal");
+  var createBaseWorld = (context, entityIndex) => defineHiddenProperty(context || {}, $internal, {
+    entityIndex: entityIndex || createEntityIndex(),
+    entityMasks: [[]],
+    entityComponents: /* @__PURE__ */ new Map(),
+    bitflag: 1,
+    componentMap: /* @__PURE__ */ new Map(),
+    componentCount: 0,
+    queries: /* @__PURE__ */ new Set(),
+    queriesHashMap: /* @__PURE__ */ new Map(),
+    notQueries: /* @__PURE__ */ new Set(),
+    dirtyQueries: /* @__PURE__ */ new Set(),
+    entitiesWithRelations: /* @__PURE__ */ new Set(),
+    // Initialize hierarchy tracking
+    hierarchyData: /* @__PURE__ */ new Map(),
+    hierarchyActiveRelations: /* @__PURE__ */ new Set(),
+    hierarchyQueryCache: /* @__PURE__ */ new Map()
+  });
+  function createWorld(...args) {
+    let entityIndex;
+    let context;
+    args.forEach((arg) => {
+      if (typeof arg === "object" && "dense" in arg && "sparse" in arg && "aliveCount" in arg) {
+        entityIndex = arg;
+      } else if (typeof arg === "object") {
+        context = arg;
       }
-    };
-    collectArrayElementCounts(schema);
-    const metadata = {
-      [$storeSize]: size,
-      [$storeMaps]: {},
-      [$storeSubarrays]: {},
-      [$storeRef]: $store,
-      [$subarrayCursors]: Object.keys(TYPES).reduce((a, type) => ({ ...a, [type]: 0 }), {}),
-      [$storeFlattened]: [],
-      [$storeArrayElementCounts]: arrayElementCounts
-    };
-    if (schema instanceof Object && Object.keys(schema).length) {
-      const recursiveTransform = (a, k) => {
-        if (typeof a[k] === "string") {
-          a[k] = createTypeStore(a[k], size);
-          a[k][$storeBase] = () => stores[$store];
-          metadata[$storeFlattened].push(a[k]);
-        } else if (isArrayType(a[k])) {
-          const [type, length] = a[k];
-          a[k] = createArrayStore(metadata, type, length);
-          a[k][$storeBase] = () => stores[$store];
-          metadata[$storeFlattened].push(a[k]);
-        } else if (a[k] instanceof Object) {
-          a[k] = Object.keys(a[k]).reduce(recursiveTransform, a[k]);
-        }
-        return a;
-      };
-      stores[$store] = Object.assign(Object.keys(schema).reduce(recursiveTransform, schema), metadata);
-      stores[$store][$storeBase] = () => stores[$store];
-      return stores[$store];
-    }
+    });
+    return createBaseWorld(context, entityIndex);
+  }
+  var resetWorld = (world) => {
+    const ctx = world[$internal];
+    ctx.entityIndex = createEntityIndex();
+    ctx.entityMasks = [[]];
+    ctx.entityComponents = /* @__PURE__ */ new Map();
+    ctx.bitflag = 1;
+    ctx.componentMap = /* @__PURE__ */ new Map();
+    ctx.componentCount = 0;
+    ctx.queries = /* @__PURE__ */ new Set();
+    ctx.queriesHashMap = /* @__PURE__ */ new Map();
+    ctx.notQueries = /* @__PURE__ */ new Set();
+    ctx.dirtyQueries = /* @__PURE__ */ new Set();
+    ctx.entitiesWithRelations = /* @__PURE__ */ new Set();
+    ctx.hierarchyData = /* @__PURE__ */ new Map();
+    ctx.hierarchyActiveRelations = /* @__PURE__ */ new Set();
+    ctx.hierarchyQueryCache = /* @__PURE__ */ new Map();
+    return world;
   };
+  var deleteWorld = (world) => {
+    delete world[$internal];
+  };
+  var getWorldComponents = (world) => Object.keys(world[$internal].componentMap);
+  var getAllEntities = (world) => Array.from(world[$internal].entityComponents.keys());
 
-  // src/Util.js
-  var SparseSet = () => {
+  // src/core/utils/SparseSet.ts
+  var createSparseSet = () => {
     const dense = [];
     const sparse = [];
-    dense.sort = function (comparator) {
-      const result = Array.prototype.sort.call(this, comparator);
-      for (let i = 0; i < dense.length; i++) {
-        sparse[dense[i]] = i;
-      }
-      return result;
-    };
     const has = (val) => dense[sparse[val]] === val;
     const add = (val) => {
-      if (has(val))
-        return;
+      if (has(val)) return;
       sparse[val] = dense.push(val) - 1;
     };
     const remove = (val) => {
-      if (!has(val))
-        return;
+      if (!has(val)) return;
       const index = sparse[val];
       const swapped = dense.pop();
       if (swapped !== val) {
@@ -222,837 +153,963 @@
       dense.length = 0;
       sparse.length = 0;
     };
+    const sort = (compareFn) => {
+      dense.sort(compareFn);
+      for (let i = 0; i < dense.length; i++) {
+        sparse[dense[i]] = i;
+      }
+    };
     return {
       add,
       remove,
       has,
       sparse,
       dense,
-      reset
+      reset,
+      sort
+    };
+  };
+  var SharedArrayBufferOrArrayBuffer = typeof SharedArrayBuffer !== "undefined" ? SharedArrayBuffer : ArrayBuffer;
+  var createUint32SparseSet = (initialCapacity = 1e3) => {
+    const sparse = [];
+    let length = 0;
+    let dense = new Uint32Array(new SharedArrayBufferOrArrayBuffer(initialCapacity * 4));
+    const has = (val) => val < sparse.length && sparse[val] < length && dense[sparse[val]] === val;
+    const add = (val) => {
+      if (has(val)) return;
+      if (length >= dense.length) {
+        const newDense = new Uint32Array(new SharedArrayBufferOrArrayBuffer(dense.length * 2 * 4));
+        newDense.set(dense);
+        dense = newDense;
+      }
+      dense[length] = val;
+      sparse[val] = length;
+      length++;
+    };
+    const remove = (val) => {
+      if (!has(val)) return;
+      length--;
+      const index = sparse[val];
+      const swapped = dense[length];
+      dense[index] = swapped;
+      sparse[swapped] = index;
+    };
+    const reset = () => {
+      length = 0;
+      sparse.length = 0;
+    };
+    const sort = (compareFn) => {
+      const temp = Array.from(dense.subarray(0, length));
+      temp.sort(compareFn);
+      for (let i = 0; i < temp.length; i++) {
+        dense[i] = temp[i];
+      }
+      for (let i = 0; i < length; i++) {
+        sparse[dense[i]] = i;
+      }
+    };
+    return {
+      add,
+      remove,
+      has,
+      sparse,
+      get dense() {
+        return new Uint32Array(dense.buffer, 0, length);
+      },
+      reset,
+      sort
     };
   };
 
-  // src/Serialize.js
-  var DESERIALIZE_MODE = {
-    REPLACE: 0,
-    APPEND: 1,
-    MAP: 2
-  };
-  var resized = false;
-  var setSerializationResized = (v) => {
-    resized = v;
-  };
-  var concat = (a, v) => a.concat(v);
-  var not = (fn) => (v) => !fn(v);
-  var storeFlattened = (c) => c[$storeFlattened];
-  var isFullComponent = storeFlattened;
-  var isProperty = not(isFullComponent);
-  var isModifier = (c) => typeof c === "function" && c[$modifier];
-  var isNotModifier = not(isModifier);
-  var isChangedModifier = (c) => isModifier(c) && c()[1] === "changed";
-  var isWorld = (w) => Object.getOwnPropertySymbols(w).includes($componentMap);
-  var fromModifierToComponent = (c) => c()[0];
-  var canonicalize = (target) => {
-    if (isWorld(target))
-      return [[], /* @__PURE__ */ new Map()];
-    const fullComponentProps = target.filter(isNotModifier).filter(isFullComponent).map(storeFlattened).reduce(concat, []);
-    const changedComponentProps = target.filter(isChangedModifier).map(fromModifierToComponent).filter(isFullComponent).map(storeFlattened).reduce(concat, []);
-    const props = target.filter(isNotModifier).filter(isProperty);
-    const changedProps = target.filter(isChangedModifier).map(fromModifierToComponent).filter(isProperty);
-    const componentProps = [...fullComponentProps, ...props, ...changedComponentProps, ...changedProps];
-    const allChangedProps = [...changedComponentProps, ...changedProps].reduce((map, prop) => {
-      const $ = Symbol();
-      createShadow(prop, $);
-      map.set(prop, $);
-      return map;
-    }, /* @__PURE__ */ new Map());
-    return [componentProps, allChangedProps];
-  };
-  var defineSerializer = (target, maxBytes = 2e7) => {
-    const worldSerializer = isWorld(target);
-    let [componentProps, changedProps] = canonicalize(target);
-    const buffer = new ArrayBuffer(maxBytes);
-    const view = new DataView(buffer);
-    const entityComponentCache = /* @__PURE__ */ new Map();
-    return (ents) => {
-      if (resized) {
-        [componentProps, changedProps] = canonicalize(target);
-        resized = false;
-      }
-      if (worldSerializer) {
-        componentProps = [];
-        target[$componentMap].forEach((c, component) => {
-          if (component[$storeFlattened])
-            componentProps.push(...component[$storeFlattened]);
-          else
-            componentProps.push(component);
-        });
-      }
-      let world;
-      if (Object.getOwnPropertySymbols(ents).includes($componentMap)) {
-        world = ents;
-        ents = ents[$entityArray];
-      } else {
-        world = eidToWorld.get(ents[0]);
-      }
-      let where = 0;
-      if (!ents.length)
-        return buffer.slice(0, where);
-      const cache = /* @__PURE__ */ new Map();
-      for (let pid = 0; pid < componentProps.length; pid++) {
-        const prop = componentProps[pid];
-        const component = prop[$storeBase]();
-        const $diff = changedProps.get(prop);
-        const shadow = $diff ? prop[$diff] : null;
-        if (!cache.has(component))
-          cache.set(component, /* @__PURE__ */ new Map());
-        view.setUint8(where, pid);
-        where += 1;
-        const countWhere = where;
-        where += 4;
-        let writeCount = 0;
-        for (let i = 0; i < ents.length; i++) {
-          const eid = ents[i];
-          let componentCache = entityComponentCache.get(eid);
-          if (!componentCache)
-            componentCache = entityComponentCache.set(eid, /* @__PURE__ */ new Set()).get(eid);
-          componentCache.add(eid);
-          const newlyAddedComponent = shadow && cache.get(component).get(eid) || !componentCache.has(component) && hasComponent(world, component, eid);
-          cache.get(component).set(eid, newlyAddedComponent);
-          if (newlyAddedComponent) {
-            componentCache.add(component);
-          } else if (!hasComponent(world, component, eid)) {
-            componentCache.delete(component);
-            continue;
-          }
-          const rewindWhere = where;
-          view.setUint32(where, eid);
-          where += 4;
-          if (prop[$tagStore]) {
-            writeCount++;
-            continue;
-          }
-          if (ArrayBuffer.isView(prop[eid])) {
-            const type = prop[eid].constructor.name.replace("Array", "");
-            const indexType = prop[eid][$indexType];
-            const indexBytes = prop[eid][$indexBytes];
-            const countWhere2 = where;
-            where += indexBytes;
-            let arrayWriteCount = 0;
-            for (let i2 = 0; i2 < prop[eid].length; i2++) {
-              if (shadow) {
-                const changed = shadow[eid][i2] !== prop[eid][i2];
-                shadow[eid][i2] = prop[eid][i2];
-                if (!changed && !newlyAddedComponent) {
-                  continue;
-                }
-              }
-              view[`set${indexType}`](where, i2);
-              where += indexBytes;
-              const value = prop[eid][i2];
-              view[`set${type}`](where, value);
-              where += prop[eid].BYTES_PER_ELEMENT;
-              arrayWriteCount++;
-            }
-            if (arrayWriteCount > 0) {
-              view[`set${indexType}`](countWhere2, arrayWriteCount);
-              writeCount++;
-            } else {
-              where = rewindWhere;
-              continue;
-            }
-          } else {
-            if (shadow) {
-              const changed = shadow[eid] !== prop[eid];
-              shadow[eid] = prop[eid];
-              if (!changed && !newlyAddedComponent) {
-                where = rewindWhere;
-                continue;
-              }
-            }
-            const type = prop.constructor.name.replace("Array", "");
-            view[`set${type}`](where, prop[eid]);
-            where += prop.BYTES_PER_ELEMENT;
-            writeCount++;
-          }
-        }
-        if (writeCount > 0) {
-          view.setUint32(countWhere, writeCount);
-        } else {
-          where -= 5;
-        }
-      }
-      return buffer.slice(0, where);
+  // src/core/utils/Observer.ts
+  var createObservable = () => {
+    const observers = /* @__PURE__ */ new Set();
+    const subscribe = (observer) => {
+      observers.add(observer);
+      return () => {
+        observers.delete(observer);
+      };
     };
-  };
-  var newEntities = /* @__PURE__ */ new Map();
-  var defineDeserializer = (target) => {
-    const isWorld2 = Object.getOwnPropertySymbols(target).includes($componentMap);
-    let [componentProps] = canonicalize(target);
-    const deserializedEntities = /* @__PURE__ */ new Set();
-    return (world, packet, mode = 0) => {
-      newEntities.clear();
-      if (resized) {
-        [componentProps] = canonicalize(target);
-        resized = false;
-      }
-      if (isWorld2) {
-        componentProps = [];
-        target[$componentMap].forEach((c, component) => {
-          if (component[$storeFlattened])
-            componentProps.push(...component[$storeFlattened]);
-          else
-            componentProps.push(component);
-        });
-      }
-      const localEntities = world[$localEntities];
-      const localEntityLookup = world[$localEntityLookup];
-      const view = new DataView(packet);
-      let where = 0;
-      while (where < packet.byteLength) {
-        const pid = view.getUint8(where);
-        where += 1;
-        const entityCount = view.getUint32(where);
-        where += 4;
-        const prop = componentProps[pid];
-        for (let i = 0; i < entityCount; i++) {
-          let eid = view.getUint32(where);
-          where += 4;
-          if (mode === DESERIALIZE_MODE.MAP) {
-            if (localEntities.has(eid)) {
-              eid = localEntities.get(eid);
-            } else if (newEntities.has(eid)) {
-              eid = newEntities.get(eid);
-            } else {
-              const newEid = addEntity(world);
-              localEntities.set(eid, newEid);
-              localEntityLookup.set(newEid, eid);
-              newEntities.set(eid, newEid);
-              eid = newEid;
-            }
-          }
-          if (mode === DESERIALIZE_MODE.APPEND || mode === DESERIALIZE_MODE.REPLACE && !world[$entitySparseSet].has(eid)) {
-            const newEid = newEntities.get(eid) || addEntity(world);
-            newEntities.set(eid, newEid);
-            eid = newEid;
-          }
-          const component = prop[$storeBase]();
-          if (!hasComponent(world, component, eid)) {
-            addComponent(world, component, eid);
-          }
-          deserializedEntities.add(eid);
-          if (component[$tagStore]) {
-            continue;
-          }
-          if (ArrayBuffer.isView(prop[eid])) {
-            const array = prop[eid];
-            const count = view[`get${array[$indexType]}`](where);
-            where += array[$indexBytes];
-            for (let i2 = 0; i2 < count; i2++) {
-              const index = view[`get${array[$indexType]}`](where);
-              where += array[$indexBytes];
-              const value = view[`get${array.constructor.name.replace("Array", "")}`](where);
-              where += array.BYTES_PER_ELEMENT;
-              if (prop[$isEidType]) {
-                let localEid;
-                if (localEntities.has(value)) {
-                  localEid = localEntities.get(value);
-                } else if (newEntities.has(value)) {
-                  localEid = newEntities.get(value);
-                } else {
-                  const newEid = addEntity(world);
-                  localEntities.set(value, newEid);
-                  localEntityLookup.set(newEid, value);
-                  newEntities.set(value, newEid);
-                  localEid = newEid;
-                }
-                prop[eid][index] = localEid;
-              } else
-                prop[eid][index] = value;
-            }
-          } else {
-            const value = view[`get${prop.constructor.name.replace("Array", "")}`](where);
-            where += prop.BYTES_PER_ELEMENT;
-            if (prop[$isEidType]) {
-              let localEid;
-              if (localEntities.has(value)) {
-                localEid = localEntities.get(value);
-              } else if (newEntities.has(value)) {
-                localEid = newEntities.get(value);
-              } else {
-                const newEid = addEntity(world);
-                localEntities.set(value, newEid);
-                localEntityLookup.set(newEid, value);
-                newEntities.set(value, newEid);
-                localEid = newEid;
-              }
-              prop[eid] = localEid;
-            } else
-              prop[eid] = value;
-          }
-        }
-      }
-      const ents = Array.from(deserializedEntities);
-      deserializedEntities.clear();
-      return ents;
+    const notify = (entity, ...args) => {
+      return Array.from(observers).reduce((acc, listener) => {
+        const result = listener(entity, ...args);
+        return result && typeof result === "object" ? { ...acc, ...result } : acc;
+      }, {});
+    };
+    return {
+      subscribe,
+      notify
     };
   };
 
-  // src/Entity.js
-  var $entityMasks = Symbol("entityMasks");
-  var $entityComponents = Symbol("entityComponents");
-  var $entitySparseSet = Symbol("entitySparseSet");
-  var $entityArray = Symbol("entityArray");
-  var $entityIndices = Symbol("entityIndices");
-  var $removedEntities = Symbol("removedEntities");
-  var defaultSize = 1e5;
-  var globalEntityCursor = 0;
-  var globalSize = defaultSize;
-  var getGlobalSize = () => globalSize;
-  var removed = [];
-  var recycled = [];
-  var defaultRemovedReuseThreshold = 0.01;
-  var removedReuseThreshold = defaultRemovedReuseThreshold;
-  var resetGlobals = () => {
-    globalSize = defaultSize;
-    globalEntityCursor = 0;
-    removedReuseThreshold = defaultRemovedReuseThreshold;
-    removed.length = 0;
-    recycled.length = 0;
+  // src/core/Relation.ts
+  var $relation = Symbol.for("bitecs-relation");
+  var $pairTarget = Symbol.for("bitecs-pairTarget");
+  var $isPairComponent = Symbol.for("bitecs-isPairComponent");
+  var $relationData = Symbol.for("bitecs-relationData");
+  var createBaseRelation = () => {
+    const data = {
+      pairsMap: /* @__PURE__ */ new Map(),
+      initStore: void 0,
+      exclusiveRelation: false,
+      autoRemoveSubject: false,
+      onTargetRemoved: void 0
+    };
+    const relation = (target) => {
+      if (target === void 0) throw Error("Relation target is undefined");
+      const normalizedTarget = target === "*" ? Wildcard : target;
+      if (!data.pairsMap.has(normalizedTarget)) {
+        const component = data.initStore ? data.initStore(target) : {};
+        defineHiddenProperty(component, $relation, relation);
+        defineHiddenProperty(component, $pairTarget, normalizedTarget);
+        defineHiddenProperty(component, $isPairComponent, true);
+        data.pairsMap.set(normalizedTarget, component);
+      }
+      return data.pairsMap.get(normalizedTarget);
+    };
+    defineHiddenProperty(relation, $relationData, data);
+    return relation;
   };
-  var setDefaultSize = (newSize) => {
-    const oldSize = globalSize;
-    defaultSize = newSize;
-    resetGlobals();
-    globalSize = newSize;
-    resizeWorlds(newSize);
-    setSerializationResized(true);
+  var withStore = (createStore) => (relation) => {
+    const ctx = relation[$relationData];
+    ctx.initStore = createStore;
+    return relation;
   };
-  var setRemovedRecycleThreshold = (newThreshold) => {
-    removedReuseThreshold = newThreshold;
+  var makeExclusive = (relation) => {
+    const ctx = relation[$relationData];
+    ctx.exclusiveRelation = true;
+    return relation;
   };
-  var getEntityCursor = () => globalEntityCursor;
-  var eidToWorld = /* @__PURE__ */ new Map();
-  var flushRemovedEntities = (world) => {
-    if (!world[$manualEntityRecycling]) {
-      throw new Error("bitECS - cannot flush removed entities, enable feature with the enableManualEntityRecycling function");
+  var withAutoRemoveSubject = (relation) => {
+    const ctx = relation[$relationData];
+    ctx.autoRemoveSubject = true;
+    return relation;
+  };
+  var withOnTargetRemoved = (onRemove2) => (relation) => {
+    const ctx = relation[$relationData];
+    ctx.onTargetRemoved = onRemove2;
+    return relation;
+  };
+  var Pair = (relation, target) => {
+    if (relation === void 0) throw Error("Relation is undefined");
+    return relation(target);
+  };
+  var getRelationTargets = (world, eid, relation) => {
+    const components = getEntityComponents(world, eid);
+    const targets = [];
+    for (const c of components) {
+      if (c[$relation] === relation && c[$pairTarget] !== Wildcard && !isRelation(c[$pairTarget])) {
+        targets.push(c[$pairTarget]);
+      }
     }
-    removed.push(...recycled);
-    recycled.length = 0;
+    return targets;
   };
-  var addEntity = (world) => {
-    const eid = world[$manualEntityRecycling] ? removed.length ? removed.shift() : globalEntityCursor++ : removed.length > Math.round(globalSize * removedReuseThreshold) ? removed.shift() : globalEntityCursor++;
-    if (eid > world[$size])
-      throw new Error("bitECS - max entities reached");
-    world[$entitySparseSet].add(eid);
-    eidToWorld.set(eid, world);
-    world[$notQueries].forEach((q) => {
-      const match = queryCheckEntity(world, q, eid);
-      if (match)
-        queryAddEntity(q, eid);
+  function createRelation(...args) {
+    if (args.length === 1 && typeof args[0] === "object") {
+      const { store, exclusive, autoRemoveSubject, onTargetRemoved } = args[0];
+      const modifiers = [
+        store && withStore(store),
+        exclusive && makeExclusive,
+        autoRemoveSubject && withAutoRemoveSubject,
+        onTargetRemoved && withOnTargetRemoved(onTargetRemoved)
+      ].filter(Boolean);
+      return modifiers.reduce((acc, modifier) => modifier(acc), createBaseRelation());
+    } else {
+      const modifiers = args;
+      return modifiers.reduce((acc, modifier) => modifier(acc), createBaseRelation());
+    }
+  }
+  var $wildcard = Symbol.for("bitecs-wildcard");
+  function createWildcardRelation() {
+    const relation = createBaseRelation();
+    Object.defineProperty(relation, $wildcard, {
+      value: true,
+      enumerable: false,
+      writable: false,
+      configurable: false
     });
-    world[$entityComponents].set(eid, /* @__PURE__ */ new Set());
-    return eid;
-  };
-  var removeEntity = (world, eid) => {
-    if (!world[$entitySparseSet].has(eid))
+    return relation;
+  }
+  function getWildcard() {
+    const GLOBAL_WILDCARD = Symbol.for("bitecs-global-wildcard");
+    if (!globalThis[GLOBAL_WILDCARD]) {
+      globalThis[GLOBAL_WILDCARD] = createWildcardRelation();
+    }
+    return globalThis[GLOBAL_WILDCARD];
+  }
+  var Wildcard = getWildcard();
+  function createIsARelation() {
+    return createBaseRelation();
+  }
+  function getIsA() {
+    const GLOBAL_ISA = Symbol.for("bitecs-global-isa");
+    if (!globalThis[GLOBAL_ISA]) {
+      globalThis[GLOBAL_ISA] = createIsARelation();
+    }
+    return globalThis[GLOBAL_ISA];
+  }
+  var IsA = getIsA();
+  function isWildcard(relation) {
+    if (!relation) return false;
+    const symbols = Object.getOwnPropertySymbols(relation);
+    return symbols.includes($wildcard);
+  }
+  function isRelation(component) {
+    if (!component) return false;
+    const symbols = Object.getOwnPropertySymbols(component);
+    return symbols.includes($relationData);
+  }
+
+  // src/core/Hierarchy.ts
+  var MAX_HIERARCHY_DEPTH = 64;
+  var INVALID_DEPTH = 4294967295;
+  var DEFAULT_BUFFER_GROWTH = 1024;
+  function growDepthsArray(hierarchyData, entity) {
+    const { depths } = hierarchyData;
+    if (entity < depths.length) return depths;
+    const newSize = Math.max(entity + 1, depths.length * 2, depths.length + DEFAULT_BUFFER_GROWTH);
+    const newDepths = new Uint32Array(newSize);
+    newDepths.fill(INVALID_DEPTH);
+    newDepths.set(depths);
+    hierarchyData.depths = newDepths;
+    return newDepths;
+  }
+  function updateDepthCache(hierarchyData, entity, newDepth, oldDepth) {
+    const { depthToEntities } = hierarchyData;
+    if (oldDepth !== void 0 && oldDepth !== INVALID_DEPTH) {
+      const oldSet = depthToEntities.get(oldDepth);
+      if (oldSet) {
+        oldSet.remove(entity);
+        if (oldSet.dense.length === 0) depthToEntities.delete(oldDepth);
+      }
+    }
+    if (newDepth !== INVALID_DEPTH) {
+      if (!depthToEntities.has(newDepth)) depthToEntities.set(newDepth, createUint32SparseSet());
+      depthToEntities.get(newDepth).add(entity);
+    }
+  }
+  function updateMaxDepth(hierarchyData, depth) {
+    if (depth > hierarchyData.maxDepth) {
+      hierarchyData.maxDepth = depth;
+    }
+  }
+  function setEntityDepth(hierarchyData, entity, newDepth, oldDepth) {
+    hierarchyData.depths[entity] = newDepth;
+    updateDepthCache(hierarchyData, entity, newDepth, oldDepth);
+    updateMaxDepth(hierarchyData, newDepth);
+  }
+  function invalidateQueryCache(world, relation) {
+    const ctx = world[$internal];
+    ctx.hierarchyQueryCache.delete(relation);
+  }
+  function getHierarchyData(world, relation) {
+    const ctx = world[$internal];
+    if (!ctx.hierarchyActiveRelations.has(relation)) {
+      ctx.hierarchyActiveRelations.add(relation);
+      ensureDepthTracking(world, relation);
+      populateExistingDepths(world, relation);
+    }
+    return ctx.hierarchyData.get(relation);
+  }
+  function populateExistingDepths(world, relation) {
+    const entitiesWithRelation = query(world, [Pair(relation, Wildcard)]);
+    for (const entity of entitiesWithRelation) {
+      getEntityDepth(world, relation, entity);
+    }
+    const processedTargets = /* @__PURE__ */ new Set();
+    for (const entity of entitiesWithRelation) {
+      for (const target of getRelationTargets(world, entity, relation)) {
+        if (!processedTargets.has(target)) {
+          processedTargets.add(target);
+          getEntityDepth(world, relation, target);
+        }
+      }
+    }
+  }
+  function ensureDepthTracking(world, relation) {
+    const ctx = world[$internal];
+    if (!ctx.hierarchyData.has(relation)) {
+      const initialSize = Math.max(DEFAULT_BUFFER_GROWTH, ctx.entityIndex.dense.length * 2);
+      const depthArray = new Uint32Array(initialSize);
+      depthArray.fill(INVALID_DEPTH);
+      ctx.hierarchyData.set(relation, {
+        depths: depthArray,
+        dirty: createSparseSet(),
+        depthToEntities: /* @__PURE__ */ new Map(),
+        maxDepth: 0
+      });
+    }
+  }
+  function calculateEntityDepth(world, relation, entity, visited = /* @__PURE__ */ new Set()) {
+    if (visited.has(entity)) return 0;
+    visited.add(entity);
+    const targets = getRelationTargets(world, entity, relation);
+    if (targets.length === 0) return 0;
+    if (targets.length === 1) return getEntityDepthWithVisited(world, relation, targets[0], visited) + 1;
+    let minDepth = Infinity;
+    for (const target of targets) {
+      const depth = getEntityDepthWithVisited(world, relation, target, visited);
+      if (depth < minDepth) {
+        minDepth = depth;
+        if (minDepth === 0) break;
+      }
+    }
+    return minDepth === Infinity ? 0 : minDepth + 1;
+  }
+  function getEntityDepthWithVisited(world, relation, entity, visited) {
+    const ctx = world[$internal];
+    ensureDepthTracking(world, relation);
+    const hierarchyData = ctx.hierarchyData.get(relation);
+    let { depths } = hierarchyData;
+    depths = growDepthsArray(hierarchyData, entity);
+    if (depths[entity] === INVALID_DEPTH) {
+      const depth = calculateEntityDepth(world, relation, entity, visited);
+      setEntityDepth(hierarchyData, entity, depth);
+      return depth;
+    }
+    return depths[entity];
+  }
+  function getEntityDepth(world, relation, entity) {
+    return getEntityDepthWithVisited(world, relation, entity, /* @__PURE__ */ new Set());
+  }
+  function markChildrenDirty(world, relation, parent, dirty, visited = createSparseSet()) {
+    if (visited.has(parent)) return;
+    visited.add(parent);
+    const children = query(world, [relation(parent)]);
+    for (const child of children) {
+      dirty.add(child);
+      markChildrenDirty(world, relation, child, dirty, visited);
+    }
+  }
+  function updateHierarchyDepth(world, relation, entity, parent, updating = /* @__PURE__ */ new Set()) {
+    const ctx = world[$internal];
+    if (!ctx.hierarchyActiveRelations.has(relation)) {
       return;
-    world[$queries].forEach((q) => {
-      queryRemoveEntity(world, q, eid);
+    }
+    ensureDepthTracking(world, relation);
+    const hierarchyData = ctx.hierarchyData.get(relation);
+    if (updating.has(entity)) {
+      hierarchyData.dirty.add(entity);
+      return;
+    }
+    updating.add(entity);
+    const { depths, dirty } = hierarchyData;
+    const newDepth = parent !== void 0 ? getEntityDepth(world, relation, parent) + 1 : 0;
+    if (newDepth > MAX_HIERARCHY_DEPTH) {
+      return;
+    }
+    const oldDepth = depths[entity];
+    setEntityDepth(hierarchyData, entity, newDepth, oldDepth === INVALID_DEPTH ? void 0 : oldDepth);
+    if (oldDepth !== newDepth) {
+      markChildrenDirty(world, relation, entity, dirty, createSparseSet());
+      invalidateQueryCache(world, relation);
+    }
+  }
+  function invalidateHierarchyDepth(world, relation, entity) {
+    const ctx = world[$internal];
+    if (!ctx.hierarchyActiveRelations.has(relation)) {
+      return;
+    }
+    const hierarchyData = ctx.hierarchyData.get(relation);
+    let { depths } = hierarchyData;
+    depths = growDepthsArray(hierarchyData, entity);
+    invalidateSubtree(world, relation, entity, depths, createSparseSet());
+    invalidateQueryCache(world, relation);
+  }
+  function invalidateSubtree(world, relation, entity, depths, visited) {
+    if (visited.has(entity)) return;
+    visited.add(entity);
+    const ctx = world[$internal];
+    const hierarchyData = ctx.hierarchyData.get(relation);
+    if (entity < depths.length) {
+      const oldDepth = depths[entity];
+      if (oldDepth !== INVALID_DEPTH) {
+        hierarchyData.depths[entity] = INVALID_DEPTH;
+        updateDepthCache(hierarchyData, entity, INVALID_DEPTH, oldDepth);
+      }
+    }
+    const children = query(world, [relation(entity)]);
+    for (const child of children) {
+      invalidateSubtree(world, relation, child, depths, visited);
+    }
+  }
+  function flushDirtyDepths(world, relation) {
+    const ctx = world[$internal];
+    const hierarchyData = ctx.hierarchyData.get(relation);
+    if (!hierarchyData) return;
+    const { dirty, depths } = hierarchyData;
+    if (dirty.dense.length === 0) return;
+    for (const entity of dirty.dense) {
+      if (depths[entity] === INVALID_DEPTH) {
+        const newDepth = calculateEntityDepth(world, relation, entity);
+        setEntityDepth(hierarchyData, entity, newDepth);
+      }
+    }
+    dirty.reset();
+  }
+  function queryHierarchy(world, relation, components, options = {}) {
+    const ctx = world[$internal];
+    getHierarchyData(world, relation);
+    const queryKey = queryHash(world, [relation, ...components]);
+    const cached = ctx.hierarchyQueryCache.get(relation);
+    if (cached && cached.hash === queryKey) {
+      return cached.result;
+    }
+    flushDirtyDepths(world, relation);
+    queryInternal(world, components, options);
+    const queryObj = ctx.queriesHashMap.get(queryHash(world, components));
+    const hierarchyData = ctx.hierarchyData.get(relation);
+    const { depths } = hierarchyData;
+    queryObj.sort((a, b) => {
+      const depthA = depths[a];
+      const depthB = depths[b];
+      return depthA !== depthB ? depthA - depthB : a - b;
     });
-    if (world[$manualEntityRecycling])
-      recycled.push(eid);
-    else
-      removed.push(eid);
-    world[$entitySparseSet].remove(eid);
-    world[$entityComponents].delete(eid);
-    world[$localEntities].delete(world[$localEntityLookup].get(eid));
-    world[$localEntityLookup].delete(eid);
-    for (let i = 0; i < world[$entityMasks].length; i++)
-      world[$entityMasks][i][eid] = 0;
-  };
-  var getEntityComponents = (world, eid) => {
-    if (eid === void 0)
-      throw new Error("bitECS - entity is undefined.");
-    if (!world[$entitySparseSet].has(eid))
-      throw new Error("bitECS - entity does not exist in the world.");
-    return Array.from(world[$entityComponents].get(eid));
-  };
-  var entityExists = (world, eid) => world[$entitySparseSet].has(eid);
+    const result = options.buffered ? queryObj.dense : queryObj.dense;
+    ctx.hierarchyQueryCache.set(relation, { hash: queryKey, result });
+    return result;
+  }
+  function queryHierarchyDepth(world, relation, depth, options = {}) {
+    const hierarchyData = getHierarchyData(world, relation);
+    flushDirtyDepths(world, relation);
+    const entitiesAtDepth = hierarchyData.depthToEntities.get(depth);
+    if (entitiesAtDepth) {
+      return options.buffered ? entitiesAtDepth.dense : entitiesAtDepth.dense;
+    }
+    return options.buffered ? new Uint32Array(0) : [];
+  }
+  function getHierarchyDepth(world, entity, relation) {
+    getHierarchyData(world, relation);
+    return getEntityDepthWithVisited(world, relation, entity, /* @__PURE__ */ new Set());
+  }
+  function getMaxHierarchyDepth(world, relation) {
+    const hierarchyData = getHierarchyData(world, relation);
+    return hierarchyData.maxDepth;
+  }
 
-  // src/Query.js
-  var $modifier = Symbol("$modifier");
-  function modifier(c, mod) {
-    const inner = () => [c, mod];
-    inner[$modifier] = true;
-    return inner;
-  }
-  var Not = (c) => modifier(c, "not");
-  var Changed = (c) => modifier(c, "changed");
-  function Any(...comps) {
-    return function QueryAny() {
-      return comps;
-    };
-  }
-  function All(...comps) {
-    return function QueryAll() {
-      return comps;
-    };
-  }
-  function None(...comps) {
-    return function QueryNone() {
-      return comps;
-    };
-  }
-  var $queries = Symbol("queries");
-  var $notQueries = Symbol("notQueries");
-  var $queryAny = Symbol("queryAny");
-  var $queryAll = Symbol("queryAll");
-  var $queryNone = Symbol("queryNone");
-  var $queryMap = Symbol("queryMap");
-  var $dirtyQueries = Symbol("$dirtyQueries");
-  var $queryComponents = Symbol("queryComponents");
-  var $enterQuery = Symbol("enterQuery");
-  var $exitQuery = Symbol("exitQuery");
-  var empty = Object.freeze([]);
-  var enterQuery = (query) => (world) => {
-    if (!world[$queryMap].has(query))
-      registerQuery(world, query);
-    const q = world[$queryMap].get(query);
-    if (q.entered.dense.length === 0) {
-      return empty;
-    } else {
-      const results = q.entered.dense.slice();
-      q.entered.reset();
-      return results;
+  // src/core/Query.ts
+  var $opType = Symbol.for("bitecs-opType");
+  var $opTerms = Symbol.for("bitecs-opTerms");
+  var createOp = (type) => (...components) => ({ [$opType]: type, [$opTerms]: components });
+  var Or = createOp("Or");
+  var And = createOp("And");
+  var Not = createOp("Not");
+  var Any = Or;
+  var All = And;
+  var None = Not;
+  var $hierarchyType = Symbol.for("bitecs-hierarchyType");
+  var $hierarchyRel = Symbol.for("bitecs-hierarchyRel");
+  var $hierarchyDepth = Symbol.for("bitecs-hierarchyDepth");
+  var Hierarchy = (relation, depth) => ({
+    [$hierarchyType]: "Hierarchy",
+    [$hierarchyRel]: relation,
+    [$hierarchyDepth]: depth
+  });
+  var Cascade = Hierarchy;
+  var $modifierType = Symbol.for("bitecs-modifierType");
+  var asBuffer = { [$modifierType]: "buffer" };
+  var isNested = { [$modifierType]: "nested" };
+  var noCommit = isNested;
+  var createHook = (type) => (...terms) => ({ [$opType]: type, [$opTerms]: terms });
+  var onAdd = createHook("add");
+  var onRemove = createHook("remove");
+  var onSet = (component) => ({ [$opType]: "set", [$opTerms]: [component] });
+  var onGet = (component) => ({ [$opType]: "get", [$opTerms]: [component] });
+  function observe(world, hook, callback) {
+    const ctx = world[$internal];
+    const { [$opType]: type, [$opTerms]: components } = hook;
+    if (type === "add" || type === "remove") {
+      const queryData = ctx.queriesHashMap.get(queryHash(world, components)) || registerQuery(world, components);
+      return queryData[type === "add" ? "addObservable" : "removeObservable"].subscribe(callback);
     }
-  };
-  var exitQuery = (query) => (world) => {
-    if (!world[$queryMap].has(query))
-      registerQuery(world, query);
-    const q = world[$queryMap].get(query);
-    if (q.exited.dense.length === 0) {
-      return empty;
-    } else {
-      const results = q.exited.dense.slice();
-      q.exited.reset();
-      return results;
+    if (type === "set" || type === "get") {
+      if (components.length !== 1) throw new Error("Set and Get hooks can only observe a single component");
+      const componentData = ctx.componentMap.get(components[0]) || registerComponent(world, components[0]);
+      return componentData[type === "set" ? "setObservable" : "getObservable"].subscribe(callback);
     }
+    throw new Error(`Invalid hook type: ${type}`);
+  }
+  var queryHash = (world, terms) => {
+    const ctx = world[$internal];
+    const getComponentId = (component) => {
+      if (!ctx.componentMap.has(component)) registerComponent(world, component);
+      return ctx.componentMap.get(component).id;
+    };
+    const termToString = (term) => $opType in term ? `${term[$opType].toLowerCase()}(${term[$opTerms].map(termToString).sort().join(",")})` : getComponentId(term).toString();
+    return terms.map(termToString).sort().join("-");
   };
-  var registerQuery = (world, query) => {
-    const components2 = [];
+  var registerQuery = (world, terms, options = {}) => {
+    const ctx = world[$internal];
+    const hash = queryHash(world, terms);
+    const queryComponents = [];
+    const collect = (term) => {
+      if ($opType in term) term[$opTerms].forEach(collect);
+      else {
+        if (!ctx.componentMap.has(term)) registerComponent(world, term);
+        queryComponents.push(term);
+      }
+    };
+    terms.forEach(collect);
+    const components = [];
     const notComponents = [];
-    const changedComponents = [];
-    query[$queryComponents].forEach((c) => {
-      if (typeof c === "function" && c[$modifier]) {
-        const [comp, mod] = c();
-        if (!world[$componentMap].has(comp))
-          registerComponent(world, comp);
-        if (mod === "not") {
-          notComponents.push(comp);
-        }
-        if (mod === "changed") {
-          changedComponents.push(comp);
-          components2.push(comp);
-        }
+    const orComponents = [];
+    const addToArray = (arr, comps) => {
+      comps.forEach((comp) => {
+        if (!ctx.componentMap.has(comp)) registerComponent(world, comp);
+        arr.push(comp);
+      });
+    };
+    terms.forEach((term) => {
+      if ($opType in term) {
+        const { [$opType]: type, [$opTerms]: comps } = term;
+        if (type === "Not") addToArray(notComponents, comps);
+        else if (type === "Or") addToArray(orComponents, comps);
+        else if (type === "And") addToArray(components, comps);
+        else throw new Error(`Nested combinator ${type} not supported yet - use simple queries for best performance`);
       } else {
-        if (!world[$componentMap].has(c))
-          registerComponent(world, c);
-        components2.push(c);
+        if (!ctx.componentMap.has(term)) registerComponent(world, term);
+        components.push(term);
       }
     });
-    const mapComponents = (c) => world[$componentMap].get(c);
-    const allComponents = components2.concat(notComponents).map(mapComponents);
-    const sparseSet = SparseSet();
-    const archetypes = [];
-    const changed = [];
-    const toRemove = SparseSet();
-    const entered = SparseSet();
-    const exited = SparseSet();
-    const generations = allComponents.map((c) => c.generationId).reduce((a, v) => {
-      if (a.includes(v))
-        return a;
-      a.push(v);
-      return a;
-    }, []);
-    const reduceBitflags = (a, c) => {
-      if (!a[c.generationId])
-        a[c.generationId] = 0;
-      a[c.generationId] |= c.bitflag;
-      return a;
-    };
-    const masks = components2.map(mapComponents).reduce(reduceBitflags, {});
-    const notMasks = notComponents.map(mapComponents).reduce(reduceBitflags, {});
-    const hasMasks = allComponents.reduce(reduceBitflags, {});
-    const flatProps = components2.filter((c) => !c[$tagStore]).map((c) => Object.getOwnPropertySymbols(c).includes($storeFlattened) ? c[$storeFlattened] : [c]).reduce((a, v) => a.concat(v), []);
-    const shadows = [];
-    const q = Object.assign(sparseSet, {
-      archetypes,
-      changed,
-      components: components2,
+    const allComponentsData = queryComponents.map((c) => ctx.componentMap.get(c));
+    const generations = [...new Set(allComponentsData.map((c) => c.generationId))];
+    const reduceBitflags = (a, c) => (a[c.generationId] = (a[c.generationId] || 0) | c.bitflag, a);
+    const masks = components.map((c) => ctx.componentMap.get(c)).reduce(reduceBitflags, {});
+    const notMasks = notComponents.map((c) => ctx.componentMap.get(c)).reduce(reduceBitflags, {});
+    const orMasks = orComponents.map((c) => ctx.componentMap.get(c)).reduce(reduceBitflags, {});
+    const hasMasks = allComponentsData.reduce(reduceBitflags, {});
+    const query2 = Object.assign(options.buffered ? createUint32SparseSet() : createSparseSet(), {
+      allComponents: queryComponents,
+      orComponents,
       notComponents,
-      changedComponents,
-      allComponents,
       masks,
       notMasks,
+      orMasks,
       hasMasks,
       generations,
-      flatProps,
-      toRemove,
-      entered,
-      exited,
-      shadows
+      toRemove: createSparseSet(),
+      addObservable: createObservable(),
+      removeObservable: createObservable(),
+      queues: {}
     });
-    world[$queryMap].set(query, q);
-    world[$queries].add(q);
-    allComponents.forEach((c) => {
-      c.queries.add(q);
+    ctx.queries.add(query2);
+    ctx.queriesHashMap.set(hash, query2);
+    allComponentsData.forEach((c) => {
+      c.queries.add(query2);
     });
-    if (notComponents.length)
-      world[$notQueries].add(q);
-    for (let eid = 0; eid < getEntityCursor(); eid++) {
-      if (!world[$entitySparseSet].has(eid))
-        continue;
-      const match = queryCheckEntity(world, q, eid);
-      if (match)
-        queryAddEntity(q, eid);
-    }
-  };
-  var generateShadow = (q, pid) => {
-    const $ = Symbol();
-    const prop = q.flatProps[pid];
-    createShadow(prop, $);
-    q.shadows[pid] = prop[$];
-    return prop[$];
-  };
-  var diff = (q, clearDiff) => {
-    if (clearDiff)
-      q.changed = [];
-    const { flatProps, shadows } = q;
-    for (let i = 0; i < q.dense.length; i++) {
-      const eid = q.dense[i];
-      let dirty = false;
-      for (let pid = 0; pid < flatProps.length; pid++) {
-        const prop = flatProps[pid];
-        const shadow = shadows[pid] || generateShadow(q, pid);
-        if (ArrayBuffer.isView(prop[eid])) {
-          for (let i2 = 0; i2 < prop[eid].length; i2++) {
-            if (prop[eid][i2] !== shadow[eid][i2]) {
-              dirty = true;
-              break;
-            }
-          }
-          shadow[eid].set(prop[eid]);
-        } else {
-          if (prop[eid] !== shadow[eid]) {
-            dirty = true;
-            shadow[eid] = prop[eid];
-          }
-        }
+    if (notComponents.length) ctx.notQueries.add(query2);
+    const entityIndex = ctx.entityIndex;
+    for (let i = 0; i < entityIndex.aliveCount; i++) {
+      const eid = entityIndex.dense[i];
+      if (hasComponent(world, eid, Prefab)) continue;
+      const match = queryCheckEntity(world, query2, eid);
+      if (match) {
+        queryAddEntity(query2, eid);
       }
-      if (dirty)
-        q.changed.push(eid);
     }
-    return q.changed;
+    return query2;
   };
-  var flatten = (a, v) => a.concat(v);
-  var aggregateComponentsFor = (mod) => (x) => x.filter((f) => f.name === mod().constructor.name).reduce(flatten);
-  var getAnyComponents = aggregateComponentsFor(Any);
-  var getAllComponents = aggregateComponentsFor(All);
-  var getNoneComponents = aggregateComponentsFor(None);
-  var defineQuery = (...args) => {
-    let components2;
-    let any, all, none;
-    if (Array.isArray(args[0])) {
-      components2 = args[0];
-    } else {
+  function queryInternal(world, terms, options = {}) {
+    const ctx = world[$internal];
+    const hash = queryHash(world, terms);
+    let queryData = ctx.queriesHashMap.get(hash);
+    if (!queryData) {
+      queryData = registerQuery(world, terms, options);
+    } else if (options.buffered && !("buffer" in queryData.dense)) {
+      queryData = registerQuery(world, terms, { buffered: true });
     }
-    if (components2 === void 0 || components2[$componentMap] !== void 0) {
-      return (world) => world ? world[$entityArray] : components2[$entityArray];
+    return options.buffered ? queryData.dense : queryData.dense;
+  }
+  function query(world, terms, ...modifiers) {
+    const hierarchyTerm = terms.find((term) => term && typeof term === "object" && $hierarchyType in term);
+    const regularTerms = terms.filter((term) => !(term && typeof term === "object" && $hierarchyType in term));
+    let buffered = false, commit = true;
+    const hasModifiers = modifiers.some((m) => m && typeof m === "object" && $modifierType in m);
+    for (const modifier of modifiers) {
+      if (hasModifiers && modifier && typeof modifier === "object" && $modifierType in modifier) {
+        const mod = modifier;
+        if (mod[$modifierType] === "buffer") buffered = true;
+        if (mod[$modifierType] === "nested") commit = false;
+      } else if (!hasModifiers) {
+        const opts = modifier;
+        if (opts.buffered !== void 0) buffered = opts.buffered;
+        if (opts.commit !== void 0) commit = opts.commit;
+      }
     }
-    const query = function (world, clearDiff = true) {
-      if (!world[$queryMap].has(query))
-        registerQuery(world, query);
-      const q = world[$queryMap].get(query);
-      commitRemovals(world);
-      if (q.changedComponents.length)
-        return diff(q, clearDiff);
-      return q.dense;
-    };
-    query[$queryComponents] = components2;
-    query[$queryAny] = any;
-    query[$queryAll] = all;
-    query[$queryNone] = none;
-    return query;
-  };
-  var queryCheckEntity = (world, q, eid) => {
-    const { masks, notMasks, generations } = q;
-    let or = 0;
+    if (hierarchyTerm) {
+      const { [$hierarchyRel]: relation, [$hierarchyDepth]: depth } = hierarchyTerm;
+      return depth !== void 0 ? queryHierarchyDepth(world, relation, depth, { buffered }) : queryHierarchy(world, relation, regularTerms, { buffered });
+    }
+    if (commit) commitRemovals(world);
+    return queryInternal(world, regularTerms, { buffered });
+  }
+  function queryCheckEntity(world, query2, eid) {
+    const ctx = world[$internal];
+    const { masks, notMasks, orMasks, generations } = query2;
+    let hasOrMatch = Object.keys(orMasks).length === 0;
     for (let i = 0; i < generations.length; i++) {
       const generationId = generations[i];
       const qMask = masks[generationId];
       const qNotMask = notMasks[generationId];
-      const eMask = world[$entityMasks][generationId][eid];
+      const qOrMask = orMasks[generationId];
+      const eMask = ctx.entityMasks[generationId][eid];
       if (qNotMask && (eMask & qNotMask) !== 0) {
         return false;
       }
       if (qMask && (eMask & qMask) !== qMask) {
         return false;
       }
+      if (qOrMask && (eMask & qOrMask) !== 0) {
+        hasOrMatch = true;
+      }
+    }
+    return hasOrMatch;
+  }
+  var queryAddEntity = (query2, eid) => {
+    query2.toRemove.remove(eid);
+    query2.addObservable.notify(eid);
+    query2.add(eid);
+  };
+  var queryCommitRemovals = (query2) => {
+    for (let i = 0; i < query2.toRemove.dense.length; i++) {
+      const eid = query2.toRemove.dense[i];
+      query2.remove(eid);
+    }
+    query2.toRemove.reset();
+  };
+  var commitRemovals = (world) => {
+    const ctx = world[$internal];
+    if (!ctx.dirtyQueries.size) return;
+    ctx.dirtyQueries.forEach(queryCommitRemovals);
+    ctx.dirtyQueries.clear();
+  };
+  var queryRemoveEntity = (world, query2, eid) => {
+    const ctx = world[$internal];
+    const has = query2.has(eid);
+    if (!has || query2.toRemove.has(eid)) return;
+    query2.toRemove.add(eid);
+    ctx.dirtyQueries.add(query2);
+    query2.removeObservable.notify(eid);
+  };
+  var removeQuery = (world, terms) => {
+    const ctx = world[$internal];
+    const hash = queryHash(world, terms);
+    const query2 = ctx.queriesHashMap.get(hash);
+    if (query2) {
+      ctx.queries.delete(query2);
+      ctx.queriesHashMap.delete(hash);
+    }
+  };
+
+  // src/core/Component.ts
+  var registerComponent = (world, component) => {
+    if (!component) {
+      throw new Error(`bitECS - Cannot register null or undefined component`);
+    }
+    const ctx = world[$internal];
+    const queries = /* @__PURE__ */ new Set();
+    const data = {
+      id: ctx.componentCount++,
+      generationId: ctx.entityMasks.length - 1,
+      bitflag: ctx.bitflag,
+      ref: component,
+      queries,
+      setObservable: createObservable(),
+      getObservable: createObservable()
+    };
+    ctx.componentMap.set(component, data);
+    ctx.bitflag *= 2;
+    if (ctx.bitflag >= 2 ** 31) {
+      ctx.bitflag = 1;
+      ctx.entityMasks.push([]);
+    }
+    return data;
+  };
+  var registerComponents = (world, components) => {
+    components.forEach((component) => registerComponent(world, component));
+  };
+  var hasComponent = (world, eid, component) => {
+    const ctx = world[$internal];
+    const registeredComponent = ctx.componentMap.get(component);
+    if (!registeredComponent) return false;
+    const { generationId, bitflag } = registeredComponent;
+    const mask = ctx.entityMasks[generationId][eid];
+    return (mask & bitflag) === bitflag;
+  };
+  var getComponent = (world, eid, component) => {
+    const ctx = world[$internal];
+    const componentData = ctx.componentMap.get(component);
+    if (!componentData) {
+      return void 0;
+    }
+    if (!hasComponent(world, eid, component)) {
+      return void 0;
+    }
+    return componentData.getObservable.notify(eid);
+  };
+  var set = (component, data) => ({
+    component,
+    data
+  });
+  var recursivelyInherit = (ctx, world, baseEid, inheritedEid, visited = /* @__PURE__ */ new Set()) => {
+    if (visited.has(inheritedEid)) return;
+    visited.add(inheritedEid);
+    addComponent(world, baseEid, IsA(inheritedEid));
+    for (const component of getEntityComponents(world, inheritedEid)) {
+      if (component === Prefab) continue;
+      if (!hasComponent(world, baseEid, component)) {
+        addComponent(world, baseEid, component);
+        const componentData = ctx.componentMap.get(component);
+        if (componentData?.setObservable) {
+          const data = getComponent(world, inheritedEid, component);
+          componentData.setObservable.notify(baseEid, data);
+        }
+      }
+    }
+    for (const parentEid of getRelationTargets(world, inheritedEid, IsA)) {
+      recursivelyInherit(ctx, world, baseEid, parentEid, visited);
+    }
+  };
+  var setComponent = (world, eid, component, data) => {
+    addComponent(world, eid, set(component, data));
+  };
+  var addComponent = (world, eid, componentOrSet) => {
+    if (!entityExists(world, eid)) {
+      throw new Error(`Cannot add component - entity ${eid} does not exist in the world.`);
+    }
+    const ctx = world[$internal];
+    const component = "component" in componentOrSet ? componentOrSet.component : componentOrSet;
+    const data = "data" in componentOrSet ? componentOrSet.data : void 0;
+    if (!ctx.componentMap.has(component)) registerComponent(world, component);
+    const componentData = ctx.componentMap.get(component);
+    if (hasComponent(world, eid, component)) {
+      if (data !== void 0) {
+        componentData.setObservable.notify(eid, data);
+      }
+      return false;
+    }
+    const { generationId, bitflag, queries } = componentData;
+    ctx.entityMasks[generationId][eid] |= bitflag;
+    if (!hasComponent(world, eid, Prefab)) {
+      queries.forEach((queryData) => {
+        queryData.toRemove.remove(eid);
+        const match = queryCheckEntity(world, queryData, eid);
+        if (match) queryAddEntity(queryData, eid);
+        else queryRemoveEntity(world, queryData, eid);
+      });
+    }
+    ctx.entityComponents.get(eid).add(component);
+    if (data !== void 0) {
+      componentData.setObservable.notify(eid, data);
+    }
+    if (component[$isPairComponent]) {
+      const relation = component[$relation];
+      const target = component[$pairTarget];
+      addComponents(world, eid, Pair(relation, Wildcard), Pair(Wildcard, target));
+      if (typeof target === "number") {
+        addComponents(world, target, Pair(Wildcard, eid), Pair(Wildcard, relation));
+        ctx.entitiesWithRelations.add(target);
+        ctx.entitiesWithRelations.add(eid);
+      }
+      ctx.entitiesWithRelations.add(target);
+      const relationData = relation[$relationData];
+      if (relationData.exclusiveRelation === true && target !== Wildcard) {
+        const oldTarget = getRelationTargets(world, eid, relation)[0];
+        if (oldTarget !== void 0 && oldTarget !== null && oldTarget !== target) {
+          removeComponent(world, eid, relation(oldTarget));
+        }
+      }
+      if (relation === IsA) {
+        const inheritedTargets = getRelationTargets(world, eid, IsA);
+        for (const inherited of inheritedTargets) {
+          recursivelyInherit(ctx, world, eid, inherited);
+        }
+      }
+      updateHierarchyDepth(world, relation, eid, typeof target === "number" ? target : void 0);
     }
     return true;
   };
-  var queryAddEntity = (q, eid) => {
-    q.toRemove.remove(eid);
-    q.entered.add(eid);
-    q.add(eid);
-  };
-  var queryCommitRemovals = (q) => {
-    for (let i = q.toRemove.dense.length - 1; i >= 0; i--) {
-      const eid = q.toRemove.dense[i];
-      q.toRemove.remove(eid);
-      q.remove(eid);
+  function addComponents(world, eid, ...args) {
+    const components = Array.isArray(args[0]) ? args[0] : args;
+    components.forEach((componentOrSet) => {
+      addComponent(world, eid, componentOrSet);
+    });
+  }
+  var removeComponent = (world, eid, ...components) => {
+    const ctx = world[$internal];
+    if (!entityExists(world, eid)) {
+      throw new Error(`Cannot remove component - entity ${eid} does not exist in the world.`);
     }
-  };
-  var commitRemovals = (world) => {
-    if (!world[$dirtyQueries].size)
-      return;
-    world[$dirtyQueries].forEach(queryCommitRemovals);
-    world[$dirtyQueries].clear();
-  };
-  var queryRemoveEntity = (world, q, eid) => {
-    if (!q.has(eid) || q.toRemove.has(eid))
-      return;
-    q.toRemove.add(eid);
-    world[$dirtyQueries].add(q);
-    q.exited.add(eid);
-  };
-  var resetChangedQuery = (world, query) => {
-    const q = world[$queryMap].get(query);
-    q.changed = [];
-  };
-  var removeQuery = (world, query) => {
-    const q = world[$queryMap].get(query);
-    world[$queries].delete(q);
-    world[$queryMap].delete(query);
-  };
-
-  // src/Component.js
-  var $componentMap = Symbol("componentMap");
-  var components = [];
-  var defineComponent = (schema, size) => {
-    const component = createStore(schema, size || getGlobalSize());
-    if (schema && Object.keys(schema).length)
-      components.push(component);
-    return component;
-  };
-  var incrementBitflag = (world) => {
-    world[$bitflag] *= 2;
-    if (world[$bitflag] >= 2 ** 31) {
-      world[$bitflag] = 1;
-      world[$entityMasks].push(new Uint32Array(world[$size]));
-    }
-  };
-  var registerComponent = (world, component) => {
-    if (!component)
-      throw new Error(`bitECS - Cannot register null or undefined component`);
-    const queries = /* @__PURE__ */ new Set();
-    const notQueries = /* @__PURE__ */ new Set();
-    const changedQueries = /* @__PURE__ */ new Set();
-    world[$queries].forEach((q) => {
-      if (q.allComponents.includes(component)) {
-        queries.add(q);
+    components.forEach((component) => {
+      if (!hasComponent(world, eid, component)) return;
+      const componentNode = ctx.componentMap.get(component);
+      const { generationId, bitflag, queries } = componentNode;
+      ctx.entityMasks[generationId][eid] &= ~bitflag;
+      queries.forEach((queryData) => {
+        queryData.toRemove.remove(eid);
+        const match = queryCheckEntity(world, queryData, eid);
+        if (match) queryAddEntity(queryData, eid);
+        else queryRemoveEntity(world, queryData, eid);
+      });
+      ctx.entityComponents.get(eid).delete(component);
+      if (component[$isPairComponent]) {
+        const target = component[$pairTarget];
+        const relation = component[$relation];
+        invalidateHierarchyDepth(world, relation, eid);
+        removeComponent(world, eid, Pair(Wildcard, target));
+        if (typeof target === "number" && entityExists(world, target)) {
+          removeComponent(world, target, Pair(Wildcard, eid));
+          removeComponent(world, target, Pair(Wildcard, relation));
+        }
+        const otherTargets = getRelationTargets(world, eid, relation);
+        if (otherTargets.length === 0) {
+          removeComponent(world, eid, Pair(relation, Wildcard));
+        }
       }
     });
-    world[$componentMap].set(component, {
-      generationId: world[$entityMasks].length - 1,
-      bitflag: world[$bitflag],
-      store: component,
-      queries,
-      notQueries,
-      changedQueries
-    });
-    incrementBitflag(world);
   };
-  var registerComponents = (world, components2) => {
-    components2.forEach((c) => registerComponent(world, c));
+  var removeComponents = removeComponent;
+
+  // src/core/Entity.ts
+  var Prefab = {};
+  var addPrefab = (world) => {
+    const eid = addEntity(world);
+    addComponent(world, eid, Prefab);
+    return eid;
   };
-  var hasComponent = (world, component, eid) => {
-    const registeredComponent = world[$componentMap].get(component);
-    if (!registeredComponent)
-      return false;
-    const { generationId, bitflag } = registeredComponent;
-    const mask = world[$entityMasks][generationId][eid];
-    return (mask & bitflag) === bitflag;
-  };
-  var addComponent = (world, component, eid, reset = false) => {
-    if (eid === void 0)
-      throw new Error("bitECS - entity is undefined.");
-    if (!world[$entitySparseSet].has(eid))
-      throw new Error("bitECS - entity does not exist in the world.");
-    if (!world[$componentMap].has(component))
-      registerComponent(world, component);
-    if (hasComponent(world, component, eid))
-      return;
-    const c = world[$componentMap].get(component);
-    const { generationId, bitflag, queries, notQueries } = c;
-    world[$entityMasks][generationId][eid] |= bitflag;
-    queries.forEach((q) => {
-      q.toRemove.remove(eid);
+  var addEntity = (world) => {
+    const ctx = world[$internal];
+    const eid = addEntityId(ctx.entityIndex);
+    ctx.notQueries.forEach((q) => {
       const match = queryCheckEntity(world, q, eid);
-      if (match) {
-        q.exited.remove(eid);
-        queryAddEntity(q, eid);
-      }
-      if (!match) {
-        q.entered.remove(eid);
-        queryRemoveEntity(world, q, eid);
-      }
+      if (match) queryAddEntity(q, eid);
     });
-    world[$entityComponents].get(eid).add(component);
-    if (reset)
-      resetStoreFor(component, eid);
+    ctx.entityComponents.set(eid, /* @__PURE__ */ new Set());
+    return eid;
   };
-  var removeComponent = (world, component, eid, reset = true) => {
-    if (eid === void 0)
-      throw new Error("bitECS - entity is undefined.");
-    if (!world[$entitySparseSet].has(eid))
-      throw new Error("bitECS - entity does not exist in the world.");
-    if (!hasComponent(world, component, eid))
-      return;
-    const c = world[$componentMap].get(component);
-    const { generationId, bitflag, queries } = c;
-    world[$entityMasks][generationId][eid] &= ~bitflag;
-    queries.forEach((q) => {
-      q.toRemove.remove(eid);
-      const match = queryCheckEntity(world, q, eid);
-      if (match) {
-        q.exited.remove(eid);
-        queryAddEntity(q, eid);
+  var removeEntity = (world, eid) => {
+    const ctx = world[$internal];
+    if (!isEntityIdAlive(ctx.entityIndex, eid)) return;
+    const removalQueue = [eid];
+    const processedEntities = /* @__PURE__ */ new Set();
+    while (removalQueue.length > 0) {
+      const currentEid = removalQueue.shift();
+      if (processedEntities.has(currentEid)) continue;
+      processedEntities.add(currentEid);
+      const componentRemovalQueue = [];
+      if (ctx.entitiesWithRelations.has(currentEid)) {
+        for (const subject of query(world, [Wildcard(currentEid)], noCommit)) {
+          if (!entityExists(world, subject)) {
+            continue;
+          }
+          for (const component of ctx.entityComponents.get(subject)) {
+            if (!component[$isPairComponent]) {
+              continue;
+            }
+            const relation = component[$relation];
+            const relationData = relation[$relationData];
+            componentRemovalQueue.push(() => removeComponent(world, subject, Pair(Wildcard, currentEid)));
+            if (component[$pairTarget] === currentEid) {
+              componentRemovalQueue.push(() => removeComponent(world, subject, component));
+              if (relationData.autoRemoveSubject) {
+                removalQueue.push(subject);
+              }
+              if (relationData.onTargetRemoved) {
+                componentRemovalQueue.push(() => relationData.onTargetRemoved(world, subject, currentEid));
+              }
+            }
+          }
+        }
+        ctx.entitiesWithRelations.delete(currentEid);
       }
-      if (!match) {
-        q.entered.remove(eid);
-        queryRemoveEntity(world, q, eid);
+      for (const removeOperation of componentRemovalQueue) {
+        removeOperation();
       }
-    });
-    world[$entityComponents].get(eid).delete(component);
-    if (reset)
-      resetStoreFor(component, eid);
-  };
-
-  // src/World.js
-  var $size = Symbol("size");
-  var $resizeThreshold = Symbol("resizeThreshold");
-  var $bitflag = Symbol("bitflag");
-  var $archetypes = Symbol("archetypes");
-  var $localEntities = Symbol("localEntities");
-  var $localEntityLookup = Symbol("localEntityLookup");
-  var $manualEntityRecycling = Symbol("manualEntityRecycling");
-  var worlds = [];
-  var resizeWorlds = (size) => {
-    worlds.forEach((world) => {
-      world[$size] = size;
-      for (let i = 0; i < world[$entityMasks].length; i++) {
-        const masks = world[$entityMasks][i];
-        world[$entityMasks][i] = resize(masks, size);
+      for (const eid2 of removalQueue) {
+        removeEntity(world, eid2);
       }
-      world[$resizeThreshold] = world[$size] - world[$size] / 5;
-    });
-  };
-  var createWorld = (...args) => {
-    const world = typeof args[0] === "object" ? args[0] : {};
-    const size = typeof args[0] === "number" ? args[0] : typeof args[1] === "number" ? args[1] : getGlobalSize();
-    resetWorld(world, size);
-    worlds.push(world);
-    return world;
-  };
-  var enableManualEntityRecycling = (world) => {
-    world[$manualEntityRecycling] = true;
-  };
-  var resetWorld = (world, size = getGlobalSize()) => {
-    world[$size] = size;
-    if (world[$entityArray])
-      world[$entityArray].forEach((eid) => removeEntity(world, eid));
-    world[$entityMasks] = [new Uint32Array(size)];
-    world[$entityComponents] = /* @__PURE__ */ new Map();
-    world[$archetypes] = [];
-    world[$entitySparseSet] = SparseSet();
-    world[$entityArray] = world[$entitySparseSet].dense;
-    world[$bitflag] = 1;
-    world[$componentMap] = /* @__PURE__ */ new Map();
-    world[$queryMap] = /* @__PURE__ */ new Map();
-    world[$queries] = /* @__PURE__ */ new Set();
-    world[$notQueries] = /* @__PURE__ */ new Set();
-    world[$dirtyQueries] = /* @__PURE__ */ new Set();
-    world[$localEntities] = /* @__PURE__ */ new Map();
-    world[$localEntityLookup] = /* @__PURE__ */ new Map();
-    world[$manualEntityRecycling] = false;
-    return world;
-  };
-  var deleteWorld = (world) => {
-    Object.getOwnPropertySymbols(world).forEach(($) => {
-      delete world[$];
-    });
-    Object.keys(world).forEach((key) => {
-      delete world[key];
-    });
-    worlds.splice(worlds.indexOf(world), 1);
-  };
-  var getWorldComponents = (world) => Array.from(world[$componentMap].keys());
-  var getAllEntities = (world) => world[$entitySparseSet].dense.slice(0);
-
-  // src/System.js
-  var defineSystem = (update) => (world, ...args) => {
-    update(world, ...args);
-    return world;
-  };
-
-  // src/index.js
-  var pipe = (...fns) => (input) => {
-    let tmp = input;
-    for (let i = 0; i < fns.length; i++) {
-      const fn = fns[i];
-      tmp = fn(tmp);
+      for (const query2 of ctx.queries) {
+        queryRemoveEntity(world, query2, currentEid);
+      }
+      removeEntityId(ctx.entityIndex, currentEid);
+      ctx.entityComponents.delete(currentEid);
+      for (let i = 0; i < ctx.entityMasks.length; i++) {
+        ctx.entityMasks[i][currentEid] = 0;
+      }
     }
-    return tmp;
   };
-  var Types = TYPES_ENUM;
+  var getEntityComponents = (world, eid) => {
+    const ctx = world[$internal];
+    if (eid === void 0) throw new Error(`getEntityComponents: entity id is undefined.`);
+    if (!isEntityIdAlive(ctx.entityIndex, eid))
+      throw new Error(`getEntityComponents: entity ${eid} does not exist in the world.`);
+    return Array.from(ctx.entityComponents.get(eid));
+  };
+  var entityExists = (world, eid) => isEntityIdAlive(world[$internal].entityIndex, eid);
+
+  // src/core/utils/pipe.ts
+  var pipe = (...functions) => {
+    return (...args) => functions.reduce((result, fn) => [fn(...result)], args)[0];
+  };
   window.bitecs = {
-    Changed,
-    DESERIALIZE_MODE,
+    $internal,
+    All,
+    And,
+    Any,
+    Cascade,
+    Hierarchy,
+    IsA,
+    None,
     Not,
-    Types,
+    Or,
+    Pair,
+    Prefab,
+    Wildcard,
     addComponent,
+    addComponents,
     addEntity,
+    addPrefab,
+    asBuffer,
     commitRemovals,
+    createEntityIndex,
+    createRelation,
     createWorld,
-    defineComponent,
-    defineDeserializer,
-    defineQuery,
-    defineSerializer,
-    defineSystem,
     deleteWorld,
-    enableManualEntityRecycling,
-    enterQuery,
     entityExists,
-    exitQuery,
-    flushRemovedEntities,
     getAllEntities,
+    getComponent,
     getEntityComponents,
+    getHierarchyDepth,
+    getId,
+    getMaxHierarchyDepth,
+    getRelationTargets,
+    getVersion,
     getWorldComponents,
     hasComponent,
-    parentArray,
+    isNested,
+    isRelation,
+    isWildcard,
+    noCommit,
+    observe,
+    onAdd,
+    onGet,
+    onRemove,
+    onSet,
     pipe,
+    query,
     registerComponent,
     registerComponents,
+    registerQuery,
     removeComponent,
+    removeComponents,
     removeEntity,
     removeQuery,
-    resetChangedQuery,
-    resetGlobals,
     resetWorld,
-    setDefaultSize,
-    setRemovedRecycleThreshold
+    set,
+    setComponent,
+    withAutoRemoveSubject,
+    withOnTargetRemoved,
+    withStore,
+    withVersioning
   };
-  //# sourceMappingURL=index.mjs.map
 })()
