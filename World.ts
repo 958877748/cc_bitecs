@@ -33,8 +33,18 @@ export default class World extends cc.Component {
         const eid = bitecs.addEntity(this.world)
         return eid
     }
-    eidAddComp(eid: number, comp: any) {
-        bitecs.addComponent(this.world, eid, comp)
+    eidAddComp(eid: number, comps: object) {
+        bitecs.addComponent(this.world, eid, comps)
+    }
+    eidAddCompData<T>(eid: number, comps: Array<T>, data: T) {
+        bitecs.addComponent(this.world, eid, comps)
+        comps[eid] = data
+    }
+    eidAddCompClass<T>(eid: number, comps: Array<T>, comp: new () => T, onData: (v: T) => void) {
+        bitecs.addComponent(this.world, eid, comps)
+        let data = new comp()
+        comps[eid] = data
+        onData(data)
     }
     removeEid(eid: number) {
         bitecs.removeEntity(this.world, eid)
