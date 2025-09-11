@@ -6,6 +6,9 @@ export default class System<W extends World = World> extends cc.Component {
     ecsWorld: bitecs.World
     initializeSystem(world: W) {
         this.world = world
+        this.onInitSystem()
+    }
+    onInitSystem() {
     }
     onUpdate(dt: number) {
     }

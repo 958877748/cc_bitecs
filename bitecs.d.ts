@@ -157,7 +157,7 @@ declare namespace bitecs {
   declare function queryInternal(world: World, terms: QueryTerm[], options?: {
     buffered?: boolean;
   }): QueryResult;
-  export declare function query(world: World, terms: QueryTerm[], ...modifiers: (QueryModifier | QueryOptions)[]): QueryResult;
+  export declare function query(world: World, terms: QueryTerm[], ...modifiers: (QueryModifier | QueryOptions)[]): EntityId[];
   declare function queryCheckEntity(world: World, query: Query, eid: EntityId): boolean;
   declare const queryCheckComponent: (query: Query, c: ComponentData) => boolean;
   declare const queryAddEntity: (query: Query, eid: EntityId) => void;
